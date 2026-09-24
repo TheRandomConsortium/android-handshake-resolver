@@ -6,7 +6,6 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketTimeoutException
-import java.nio.ByteBuffer
 
 class DnsRouter(
     private val vpnService: VpnService,
@@ -21,11 +20,12 @@ class DnsRouter(
 
     /**
      * Resolves a DNS query payload and returns the DNS response payload.
-     * Handles both direct Handshake root records and recursive referral following.
+     * Handles both direct Handshake root records, CNAME following, and recursive referral following.
      */
     fun routeQuery(rawQuery: ByteArray): ByteArray? {
         val parsed = DnsPacket.parse(rawQuery)
         val question = parsed?.questions?.firstOrNull()
+        val queryName = question?.name ?: ""
         val tld = question?.tld ?: ""
 
         val isIcann = engine.isIcannTld(tld)
@@ -36,20 +36,35 @@ class DnsRouter(
             if (hnsResponseBytes != null) {
                 val hnsParsed = DnsPacket.parse(hnsResponseBytes)
                 if (hnsParsed != null) {
-                    // Scenario A: Direct answer available from Handshake root (A, AAAA, TXT, CNAME)
+                    // Scenario A: Direct answer available from Handshake root
                     if (hnsParsed.answers.isNotEmpty() && hnsParsed.rcode == 0) {
-                        Log.d(TAG, "Direct answer for '${question?.name}' from Handshake root")
-                        return setRecursionAvailable(hnsResponseBytes)
+                        val hasIp = hnsParsed.answers.any { it.type == DnsPacket.TYPE_A || it.type == DnsPacket.TYPE_AAAA }
+                        if (hasIp) {
+                            Log.d(TAG, "Direct IP answer for '$queryName' from Handshake root")
+                            return setRecursionAvailable(hnsResponseBytes)
+                        }
+
+                        // Check if direct answer was a CNAME without A record
+                        val cnameRecord = hnsParsed.answers.firstOrNull { it.type == DnsPacket.TYPE_CNAME }
+                        if (cnameRecord != null) {
+                            val cnameTarget = cnameRecord.getAsDomainName(hnsResponseBytes)
+                            if (!cnameTarget.isNullOrEmpty()) {
+                                val targetIp = resolveHostIp(cnameTarget)
+                                if (targetIp != null) {
+                                    Log.d(TAG, "Followed root CNAME '$cnameTarget' -> ${targetIp.hostAddress}")
+                                    return DnsPacket.buildCnameResolutionResponse(
+                                        hnsParsed.id, queryName, cnameTarget, targetIp.hostAddress ?: ""
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     // Scenario B: Referral (NS records in authority section)
-                    // We must follow the referral recursively so Android gets the final answer
                     if (hnsParsed.isReferral) {
-                        val recursiveAnswer = resolveReferralRecursively(
-                            rawQuery, question?.name ?: "", hnsParsed
-                        )
+                        val recursiveAnswer = resolveReferralRecursively(rawQuery, queryName, hnsParsed)
                         if (recursiveAnswer != null) {
-                            Log.d(TAG, "Recursively resolved '${question?.name}' via Handshake NS referral")
+                            Log.d(TAG, "Recursively resolved '$queryName' via Handshake NS referral")
                             return setRecursionAvailable(recursiveAnswer)
                         }
                     }
@@ -63,42 +78,59 @@ class DnsRouter(
     }
 
     /**
-     * Recursively queries the authoritative nameservers specified in an NS referral.
+     * Recursively queries the authoritative nameservers specified in an NS referral
+     * and follows any out-of-zone CNAME records to return complete A/AAAA answers.
      */
     private fun resolveReferralRecursively(
         rawQuery: ByteArray,
         queryName: String,
         referralPacket: DnsPacket
     ): ByteArray? {
-        // Step 1: Check for GLUE A record in Additional section
+        val candidateIps = mutableListOf<InetAddress>()
+
+        // 1. Check for GLUE A record in Additional section
         val glueIp = referralPacket.findGlueIpv4()
         if (glueIp != null) {
             try {
-                val glueAddr = InetAddress.getByName(glueIp)
-                val response = queryServer(rawQuery, glueAddr, 53, timeoutMs = 2000)
-                if (response != null && isValidAnswer(response)) {
-                    return response
+                candidateIps.add(InetAddress.getByName(glueIp))
+            } catch (_: Exception) {}
+        }
+
+        // 2. Extract NS domain names from Authority section using full payload decompression
+        for (nsRecord in referralPacket.authorities) {
+            if (nsRecord.type == DnsPacket.TYPE_NS) {
+                val nsDomain = nsRecord.getAsDomainName(referralPacket.rawPayload)
+                if (!nsDomain.isNullOrEmpty()) {
+                    val nsIp = resolveHostIp(nsDomain)
+                    if (nsIp != null && !candidateIps.contains(nsIp)) {
+                        candidateIps.add(nsIp)
+                    }
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed querying GLUE IP $glueIp for $queryName: ${e.message}")
             }
         }
 
-        // Step 2: Extract NS domain name from Authority section and resolve its IP via upstream
-        for (nsRecord in referralPacket.authorities) {
-            if (nsRecord.type == DnsPacket.TYPE_NS) {
-                val nsDomain = nsRecord.getAsDomainName(ByteBuffer.wrap(referralPacket.rawPayload), 0)
-                if (!nsDomain.isNullOrEmpty()) {
-                    val nsIp = resolveHostIp(nsDomain)
-                    if (nsIp != null) {
-                        try {
-                            val response = queryServer(rawQuery, nsIp, 53, timeoutMs = 2000)
-                            if (response != null && isValidAnswer(response)) {
-                                return response
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed querying NS $nsDomain ($nsIp) for $queryName: ${e.message}")
-                        }
+        // 3. Query authoritative nameservers
+        for (nsIp in candidateIps) {
+            val responseBytes = queryServer(rawQuery, nsIp, 53, timeoutMs = 2000) ?: continue
+            val responsePacket = DnsPacket.parse(responseBytes) ?: continue
+
+            // If response has direct IP answer, return it
+            val hasIp = responsePacket.answers.any { it.type == DnsPacket.TYPE_A || it.type == DnsPacket.TYPE_AAAA }
+            if (hasIp) {
+                return responseBytes
+            }
+
+            // If response has CNAME without A record (e.g. selfpublish.randºm -> calories.tplinkdns.com)
+            val cnameRecord = responsePacket.answers.firstOrNull { it.type == DnsPacket.TYPE_CNAME }
+            if (cnameRecord != null) {
+                val cnameTarget = cnameRecord.getAsDomainName(responseBytes)
+                if (!cnameTarget.isNullOrEmpty()) {
+                    val targetIp = resolveHostIp(cnameTarget)
+                    if (targetIp != null) {
+                        Log.d(TAG, "Followed CNAME '$cnameTarget' -> ${targetIp.hostAddress}")
+                        return DnsPacket.buildCnameResolutionResponse(
+                            responsePacket.id, queryName, cnameTarget, targetIp.hostAddress ?: ""
+                        )
                     }
                 }
             }
@@ -108,11 +140,10 @@ class DnsRouter(
     }
 
     /**
-     * Resolves the IP address of an external authoritative nameserver (e.g. ns1.registrar.com).
+     * Resolves the IP address of a hostname (e.g. ns1.registrar.com or a CNAME target).
      */
     private fun resolveHostIp(host: String): InetAddress? {
         return try {
-            // Create a simple A record query for the NS host
             val queryBytes = buildSimpleAQuery(host)
             val response = queryServer(queryBytes, upstreamAddress, upstreamPort, timeoutMs = 2000)
             if (response != null) {
@@ -127,16 +158,8 @@ class DnsRouter(
         }
     }
 
-    private fun isValidAnswer(response: ByteArray): Boolean {
-        if (response.size < 12) return false
-        val flags = ((response[2].toInt() and 0xFF) shl 8) or (response[3].toInt() and 0xFF)
-        val rcode = flags and 0x0F
-        val anCount = ((response[6].toInt() and 0xFF) shl 8) or (response[7].toInt() and 0xFF)
-        return (rcode == 0 && anCount > 0)
-    }
-
     /**
-     * Sets the RA (Recursion Available) bit (0x0080 in flags) on DNS response.
+     * Sets the RA (Recursion Available) bit on DNS response flags.
      */
     private fun setRecursionAvailable(response: ByteArray): ByteArray {
         if (response.size < 4) return response
@@ -178,7 +201,7 @@ class DnsRouter(
     }
 
     private fun buildSimpleAQuery(domain: String): ByteArray {
-        val ascii = DnsQuestion.toPunycode(domain)
+        val ascii = Punycode.toPunycode(domain)
         val labels = ascii.trimEnd('.').split('.')
         val output = mutableListOf<Byte>()
 

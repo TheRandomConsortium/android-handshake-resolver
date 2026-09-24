@@ -1,8 +1,100 @@
 package org.handshake.resolver.dns
 
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.net.IDN
 import java.net.InetAddress
 import java.nio.ByteBuffer
+
+object Punycode {
+    private const val BASE = 36
+    private const val TMIN = 1
+    private const val TMAX = 26
+    private const val SKEW = 38
+    private const val DAMP = 700
+    private const val INITIAL_BIAS = 72
+    private const val INITIAL_N = 128
+    private const val DELIMITER = '-'
+
+    /**
+     * Encodes a single label to RFC 3492 Punycode without Unicode NFKC mapping.
+     */
+    fun encodeLabel(input: String): String {
+        val s = input.trim().lowercase()
+        if (s.startsWith("xn--")) return s
+        if (s.all { it.code < 128 }) return s
+
+        val codePoints = s.codePoints().toArray()
+        var n = INITIAL_N
+        var delta = 0
+        var bias = INITIAL_BIAS
+        val output = StringBuilder("xn--")
+
+        for (cp in codePoints) {
+            if (cp < 128) output.append(cp.toChar())
+        }
+
+        val b = output.length - 4
+        var h = b
+        if (h > 0) output.append(DELIMITER)
+
+        while (h < codePoints.size) {
+            var m = Int.MAX_VALUE
+            for (cp in codePoints) {
+                if (cp in n until m) m = cp
+            }
+
+            delta += (m - n) * (h + 1)
+            n = m
+
+            for (cp in codePoints) {
+                if (cp < n) delta++
+                if (cp == n) {
+                    var q = delta
+                    var k = BASE
+                    while (true) {
+                        val t = when {
+                            k <= bias -> TMIN
+                            k >= bias + TMAX -> TMAX
+                            else -> k - bias
+                        }
+                        if (q < t) break
+                        val digit = t + ((q - t) % (BASE - t))
+                        output.append(digitToChar(digit))
+                        q = (q - t) / (BASE - t)
+                        k += BASE
+                    }
+                    output.append(digitToChar(q))
+                    bias = adapt(delta, h + 1, h == b)
+                    delta = 0
+                    h++
+                }
+            }
+            delta++
+            n++
+        }
+        return output.toString()
+    }
+
+    private fun adapt(delta: Int, numPoints: Int, firstTime: Boolean): Int {
+        var d = if (firstTime) delta / DAMP else delta / 2
+        d += d / numPoints
+        var k = 0
+        while (d > ((BASE - TMIN) * TMAX) / 2) {
+            d /= (BASE - TMIN)
+            k += BASE
+        }
+        return k + (((BASE - TMIN + 1) * d) / (d + SKEW))
+    }
+
+    private fun digitToChar(digit: Int): Char {
+        return if (digit < 26) ('a'.code + digit).toChar() else ('0'.code + (digit - 26)).toChar()
+    }
+
+    fun toPunycode(domain: String): String {
+        return domain.trim().split('.').joinToString(".") { encodeLabel(it) }
+    }
+}
 
 data class DnsQuestion(
     val name: String,
@@ -10,7 +102,7 @@ data class DnsQuestion(
     val clazz: Int
 ) {
     /**
-     * TLD in canonical lowercase ASCII / Punycode format (e.g. "com", "badass", "xn--53h").
+     * TLD in canonical lowercase ASCII / Punycode format (e.g. "com", "badass", "xn--randm-cka").
      */
     val tld: String
         get() {
@@ -27,11 +119,7 @@ data class DnsQuestion(
         }
 
     companion object {
-        fun toPunycode(domain: String): String = try {
-            IDN.toASCII(domain.trim(), IDN.ALLOW_UNASSIGNED).lowercase()
-        } catch (_: Exception) {
-            domain.lowercase()
-        }
+        fun toPunycode(domain: String): String = Punycode.toPunycode(domain)
     }
 }
 
@@ -40,7 +128,8 @@ data class DnsRecord(
     val type: Int,
     val clazz: Int,
     val ttl: Long,
-    val rdata: ByteArray
+    val rdata: ByteArray,
+    val rdataOffset: Int = 0
 ) {
     fun getAsIpv4(): String? {
         if (type == DnsPacket.TYPE_A && rdata.size == 4) {
@@ -53,10 +142,11 @@ data class DnsRecord(
         return null
     }
 
-    fun getAsDomainName(rawBuffer: ByteBuffer, baseOffset: Int): String? {
+    fun getAsDomainName(fullPayload: ByteArray): String? {
         if (type == DnsPacket.TYPE_NS || type == DnsPacket.TYPE_CNAME) {
             return try {
-                val buf = ByteBuffer.wrap(rdata)
+                val buf = ByteBuffer.wrap(fullPayload)
+                buf.position(rdataOffset)
                 DnsPacket.readDomainName(buf, 0)
             } catch (_: Exception) {
                 null
@@ -80,7 +170,7 @@ class DnsPacket(
     val isReferral: Boolean = (answers.isEmpty() && authorities.isNotEmpty())
 
     /**
-     * Finds any IPv4 addresses in Additional records (GLUE) for a given nameserver.
+     * Finds any IPv4 addresses in Additional records (GLUE) for nameservers.
      */
     fun findGlueIpv4(): String? {
         for (record in additionals) {
@@ -140,9 +230,10 @@ class DnsPacket(
                 val ttl = buffer.int.toLong() and 0xFFFFFFFFL
                 val rdLength = buffer.short.toInt() and 0xFFFF
                 if (buffer.remaining() < rdLength) break
+                val rdataOffset = buffer.position()
                 val rdata = ByteArray(rdLength)
                 buffer.get(rdata)
-                records.add(DnsRecord(name, type, clazz, ttl, rdata))
+                records.add(DnsRecord(name, type, clazz, ttl, rdata, rdataOffset))
             }
             return records
         }
@@ -184,6 +275,87 @@ class DnsPacket(
             }
 
             return sb.toString().trimEnd('.')
+        }
+
+        fun writeDomainName(dos: DataOutputStream, domain: String) {
+            val ascii = Punycode.toPunycode(domain)
+            val labels = ascii.trimEnd('.').split('.')
+            for (label in labels) {
+                if (label.isEmpty()) continue
+                dos.writeByte(label.length)
+                for (c in label.toCharArray()) {
+                    dos.writeByte(c.code)
+                }
+            }
+            dos.writeByte(0) // End label
+        }
+
+        fun domainNameToBytes(domain: String): ByteArray {
+            val baos = ByteArrayOutputStream()
+            val dos = DataOutputStream(baos)
+            writeDomainName(dos, domain)
+            dos.flush()
+            return baos.toByteArray()
+        }
+
+        /**
+         * Builds a complete recursive DNS response following a CNAME:
+         * Answer 1: QNAME CNAME targetDomain
+         * Answer 2: targetDomain A targetIp
+         * Answer 3: QNAME A targetIp (for stub clients that require direct QNAME answer)
+         */
+        fun buildCnameResolutionResponse(
+            queryId: Int,
+            queryName: String,
+            cnameTarget: String,
+            targetIp: String,
+            ttl: Long = 60
+        ): ByteArray {
+            val out = ByteArrayOutputStream()
+            val dos = DataOutputStream(out)
+
+            // DNS Header: ID, Flags (QR, RD, RA, NOERROR), QD=1, AN=3, NS=0, AR=0
+            dos.writeShort(queryId)
+            dos.writeShort(0x8180)
+            dos.writeShort(1) // QDCOUNT
+            dos.writeShort(3) // ANCOUNT
+            dos.writeShort(0)
+            dos.writeShort(0)
+
+            // Question
+            writeDomainName(dos, queryName)
+            dos.writeShort(TYPE_A)
+            dos.writeShort(1) // IN
+
+            // Answer 1: QNAME CNAME targetDomain
+            writeDomainName(dos, queryName)
+            dos.writeShort(TYPE_CNAME)
+            dos.writeShort(1) // IN
+            dos.writeInt(ttl.toInt())
+            val targetBytes = domainNameToBytes(cnameTarget)
+            dos.writeShort(targetBytes.size)
+            dos.write(targetBytes)
+
+            val ipParts = targetIp.split(".").map { it.toInt() }
+
+            // Answer 2: targetDomain A targetIp
+            writeDomainName(dos, cnameTarget)
+            dos.writeShort(TYPE_A)
+            dos.writeShort(1) // IN
+            dos.writeInt(ttl.toInt())
+            dos.writeShort(4)
+            for (part in ipParts) dos.writeByte(part)
+
+            // Answer 3: QNAME A targetIp
+            writeDomainName(dos, queryName)
+            dos.writeShort(TYPE_A)
+            dos.writeShort(1) // IN
+            dos.writeInt(ttl.toInt())
+            dos.writeShort(4)
+            for (part in ipParts) dos.writeByte(part)
+
+            dos.flush()
+            return out.toByteArray()
         }
 
         /**
