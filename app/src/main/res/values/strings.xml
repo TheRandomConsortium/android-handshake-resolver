@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">HNS Resolver</string>
+    <string name="title_status">Resolver Status</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_syncing">Syncing Handshake Chain...</string>
+    <string name="status_active">Active • Fully Synced</string>
+    <string name="keep_open_warning">We recommend keeping the app open until the initial SPV header sync is achieved. Once synced, Handshake domains resolve natively in all apps.</string>
+    <string name="btn_start">Start HNS Resolver</string>
+    <string name="btn_stop">Stop Resolver</string>
+    <string name="section_details">Engine &amp; Network</string>
+    <string name="label_engine">Engine</string>
+    <string name="label_block_height">Block Height</string>
+    <string name="label_mode">VPN Mode</string>
+    <string name="mode_dns_only">DNS-Only Loopback (Line Speed)</string>
+    <string name="label_upstream">ICANN Upstream</string>
+    <string name="section_test">Test Domain Resolution</string>
+    <string name="test_hint">e.g. proofofconcept.badass</string>
+    <string name="btn_test">Resolve</string>
+</resources>
