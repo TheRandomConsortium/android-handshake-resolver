@@ -1,0 +1,16 @@
+AuthorName: 'The Random Consortium'
+Categories:
+- mreugenej7-repo
+CurrentVersion: '1.0.0'
+CurrentVersionCode: 1
+IssueTracker: 'https://therandomconsortium.org'
+Name: Handshake DNS Resolver
+SourceCode: 'https://therandomconsortium.org'
+Summary: 'Sovereign SPV Handshake DNS Resolver'
+Description: >-
+  Handshake DNS Resolver enables native resolution of decentralized Handshake
+  TLDs (.randºm, etc.) and ICANN domains directly on Android. Powered by an
+  embedded native C hnsd light client with SPV chain verification, it captures
+  DNS queries via a zero-overhead local loopback VPN without routing, proxying,
+  or logging web traffic.
+WebSite: 'https://therandomconsortium.org'
