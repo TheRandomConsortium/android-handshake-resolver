@@ -80,13 +80,15 @@ hsk_store_write(const hsk_chain_t *chain) {
   if (!write_u8(&data, HSK_STORE_VERSION))
     goto fail;
 
-  assert(chain->height % HSK_STORE_CHECKPOINT_WINDOW == 0);
+  if (chain->height < HSK_STORE_CHECKPOINT_WINDOW)
+    goto fail;
+
   uint32_t height = chain->height - HSK_STORE_CHECKPOINT_WINDOW;
   if (!write_u32be(&data, height))
     goto fail;
 
-  hsk_header_t *prev = hsk_chain_get_by_height(chain, height - 1);
-  if (!write_bytes(&data, prev->work, 32))
+  hsk_header_t *prev = hsk_chain_get_by_height(chain, height > 0 ? height - 1 : 0);
+  if (!prev || !write_bytes(&data, prev->work, 32))
     goto fail;
 
   for (int i = 0; i < HSK_STORE_HEADERS_COUNT; i++) {
@@ -187,10 +189,11 @@ hsk_store_inject_checkpoint(
 
     // Sanity check: headers should connect
     if (i > 0) {
-      assert(
-        memcmp(hdr->prev_block, prev_ptr->hash, 32) == 0
-        && "invalid checkpoint: prev"
-      );
+      if (memcmp(hdr->prev_block, prev_ptr->hash, 32) != 0) {
+        hsk_store_log("invalid checkpoint: prev header mismatch\n");
+        free(hdr);
+        return false;
+      }
     }
 
     // Compute and set total chain work

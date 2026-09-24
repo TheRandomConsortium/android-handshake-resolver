@@ -54,14 +54,19 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, windowInsets ->
-            val insets = windowInsets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
-            )
-            view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
-            if (windowInsets.isVisible(WindowInsetsCompat.Type.ime()) && binding.etTestDomain.hasFocus()) {
-                binding.rootScrollView.post {
-                    binding.rootScrollView.fullScroll(View.FOCUS_DOWN)
+            try {
+                val systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+                val ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
+                val bottomInset = if (ime.bottom > systemBars.bottom) ime.bottom else systemBars.bottom
+                view.setPadding(systemBars.left, systemBars.top, systemBars.right, bottomInset)
+
+                if (ime.bottom > systemBars.bottom && binding.etTestDomain.hasFocus()) {
+                    binding.rootScrollView.post {
+                        binding.rootScrollView.fullScroll(View.FOCUS_DOWN)
+                    }
                 }
+            } catch (_: Throwable) {
+                // Fail-safe fallback on older Android versions or unsupported OEM frameworks
             }
             windowInsets
         }

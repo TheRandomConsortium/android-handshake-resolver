@@ -1,8 +1,8 @@
 AuthorName: 'The Random Consortium'
 Categories:
 - mreugenej7-repo
-CurrentVersion: '1.0.0'
-CurrentVersionCode: 1
+CurrentVersion: '1.0.1'
+CurrentVersionCode: 2
 IssueTracker: 'https://therandomconsortium.org'
 Name: Handshake DNS Resolver
 SourceCode: 'https://therandomconsortium.org'

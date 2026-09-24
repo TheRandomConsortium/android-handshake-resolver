@@ -34,7 +34,7 @@ From your local machine (within `android-hns-resolver/`):
 
 ```bash
 # 1. Copy the signed release APK to the repo directory
-scp app/build/outputs/apk/release/app-release.apk homeserver:/tmp/hns-resolver-1.0.0.apk
+scp app/build/outputs/apk/release/app-release.apk homeserver:/tmp/hns-resolver-1.0.1.apk
 
 # 2. Copy the metadata YAML and updated index.html
 scp distribution/fdroid/org.handshake.resolver.yml homeserver:/tmp/org.handshake.resolver.yml
@@ -47,8 +47,8 @@ Then SSH into `homeserver` and move the files into place:
 ssh homeserver
 
 # Move files into /var/mreugenej7-repo
-sudo mv /tmp/hns-resolver-1.0.0.apk /var/mreugenej7-repo/repo/
-sudo chown caddy:caddy /var/mreugenej7-repo/repo/hns-resolver-1.0.0.apk
+sudo mv /tmp/hns-resolver-1.0.1.apk /var/mreugenej7-repo/repo/
+sudo chown caddy:caddy /var/mreugenej7-repo/repo/hns-resolver-1.0.1.apk
 
 sudo mv /tmp/org.handshake.resolver.yml /var/mreugenej7-repo/metadata/
 sudo chown caddy:caddy /var/mreugenej7-repo/metadata/org.handshake.resolver.yml
@@ -58,7 +58,7 @@ sudo chown root:root /var/mreugenej7-repo/index.html
 
 # Create direct download symlink matching index.html
 cd /var/mreugenej7-repo
-sudo ln -sf repo/hns-resolver-1.0.0.apk HnsResolver.apk
+sudo ln -sf repo/hns-resolver-1.0.1.apk HnsResolver.apk
 
 # Regenerate F-Droid repository indexes
 sudo -u caddy fdroid update
