@@ -9,6 +9,8 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -52,8 +54,15 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, windowInsets ->
-            val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val insets = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
+            )
             view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
+            if (windowInsets.isVisible(WindowInsetsCompat.Type.ime()) && binding.etTestDomain.hasFocus()) {
+                binding.rootScrollView.post {
+                    binding.rootScrollView.fullScroll(View.FOCUS_DOWN)
+                }
+            }
             windowInsets
         }
 
@@ -85,9 +94,43 @@ class MainActivity : AppCompatActivity() {
         binding.btnTestResolve.setOnClickListener {
             val domain = binding.etTestDomain.text.toString().trim()
             if (domain.isNotEmpty()) {
+                hideKeyboard()
                 testResolveDomain(domain)
             }
         }
+
+        binding.etTestDomain.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_GO) {
+                val domain = binding.etTestDomain.text.toString().trim()
+                if (domain.isNotEmpty()) {
+                    hideKeyboard()
+                    testResolveDomain(domain)
+                }
+                true
+            } else {
+                false
+            }
+        }
+
+        binding.etTestDomain.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) {
+                binding.rootScrollView.postDelayed({
+                    binding.rootScrollView.fullScroll(View.FOCUS_DOWN)
+                }, 200)
+            }
+        }
+
+        binding.etTestDomain.setOnClickListener {
+            binding.rootScrollView.postDelayed({
+                binding.rootScrollView.fullScroll(View.FOCUS_DOWN)
+            }, 200)
+        }
+    }
+
+    private fun hideKeyboard() {
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.hideSoftInputFromWindow(binding.etTestDomain.windowToken, 0)
+        binding.etTestDomain.clearFocus()
     }
 
     private fun observeState() {
@@ -181,7 +224,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun testResolveDomain(domain: String) {
-        val asciiDomain = org.handshake.resolver.dns.DnsQuestion.toPunycode(domain)
+        val asciiDomain = Punycode.toPunycode(domain)
         binding.tvTestResult.visibility = View.VISIBLE
         val displayInfo = if (asciiDomain != domain.lowercase()) "$domain ($asciiDomain)" else domain
         binding.tvTestResult.text = "Querying Handshake resolver for '$displayInfo'..."
